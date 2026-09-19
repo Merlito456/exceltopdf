@@ -4,6 +4,7 @@ Streamlit: XLSX → JPG pages → PDF
 from __future__ import annotations
 
 import io
+import traceback
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -25,9 +26,9 @@ st.set_page_config(
 # Session state
 # ------------------------------------------------------------------ #
 if "step" not in st.session_state:
-    st.session_state.step = "upload"           # upload | converting | download
+    st.session_state.step = "upload"
 if "results" not in st.session_state:
-    st.session_state.results = {}              # name -> {"pdf": bytes, "jpgs": [bytes]}
+    st.session_state.results = {}
 if "errors" not in st.session_state:
     st.session_state.errors = {}
 
@@ -40,7 +41,7 @@ with st.sidebar:
         "Resolution (DPI)",
         options=[72, 100, 150, 200, 300],
         value=150,
-        help="Higher = sharper images, larger files. 150 DPI is print-quality.",
+        help="Higher = sharper images, larger files.",
     )
     jpeg_quality = st.slider(
         "JPEG quality",
@@ -48,12 +49,39 @@ with st.sidebar:
         max_value=100,
         value=90,
         step=5,
-        help="Higher = better visuals, larger files.",
     )
     timeout = st.slider(
         "Timeout per file (seconds)",
         min_value=30, max_value=300, value=120, step=30,
     )
+
+    st.divider()
+    st.caption("🔧 Diagnostics")
+    if st.checkbox("Run environment check"):
+        import shutil
+        import subprocess
+
+        st.write("**soffice:**", shutil.which("soffice") or "❌ NOT FOUND")
+        st.write("**libreoffice:**", shutil.which("libreoffice") or "—")
+        st.write("**pdftoppm:**", shutil.which("pdftoppm") or "❌ NOT FOUND")
+
+        try:
+            r = subprocess.run(
+                ["pdftoppm", "-v"], capture_output=True, text=True, timeout=10
+            )
+            st.code(f"pdftoppm exit={r.returncode}\n{r.stderr or r.stdout}")
+        except Exception as e:
+            st.error(f"pdftoppm run failed: {e}")
+
+        try:
+            r = subprocess.run(
+                ["soffice", "--version"],
+                capture_output=True, text=True, timeout=20,
+            )
+            st.code(f"soffice exit={r.returncode}\n{r.stdout or r.stderr}")
+        except Exception as e:
+            st.error(f"soffice run failed: {e}")
+
     st.divider()
     st.caption(
         "**Pipeline:** XLSX → PDF → JPG per page → final PDF. "
@@ -91,43 +119,60 @@ if st.session_state.step == "upload":
             st.rerun()
 
 # ================================================================== #
-# STEP 2: CONVERTING
+# STEP 2: CONVERTING (with top-level try/except for real errors)
 # ================================================================== #
 elif st.session_state.step == "converting":
-    payloads = st.session_state.get("_payloads", [])
-    total = len(payloads)
+    try:
+        payloads = st.session_state.get("_payloads", [])
+        total = len(payloads)
 
-    progress = st.progress(0.0, text="Starting…")
-    detail = st.empty()
+        if total == 0:
+            st.warning("No files to convert.")
+            st.session_state.step = "upload"
+            st.stop()
 
-    def _job(item):
-        name, data = item
-        pdf_bytes, jpgs = convert_xlsx_to_pdf_via_jpg(
-            data, name, dpi=dpi, jpeg_quality=jpeg_quality, timeout=timeout
-        )
-        return name, {"pdf": pdf_bytes, "jpgs": jpgs}
+        progress = st.progress(0.0, text="Starting…")
+        detail = st.empty()
 
-    results = {}
-    errors = {}
+        def _job(item):
+            name, data = item
+            pdf_bytes, jpgs = convert_xlsx_to_pdf_via_jpg(
+                data, name,
+                dpi=dpi,
+                jpeg_quality=jpeg_quality,
+                timeout=timeout,
+            )
+            return name, {"pdf": pdf_bytes, "jpgs": jpgs}
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = {pool.submit(_job, p): p[0] for p in payloads}
-        for i, fut in enumerate(as_completed(futures), 1):
-            name = futures[fut]
-            detail.write(f"Processing **{name}**…")
-            try:
-                _, payload = fut.result()
-                results[name] = payload
-            except ConversionError as e:
-                errors[name] = str(e)
-            except Exception as e:
-                errors[name] = f"Unexpected error: {e}"
-            progress.progress(i / total, text=f"Converted {i}/{total}")
+        results = {}
+        errors = {}
 
-    st.session_state.results = results
-    st.session_state.errors = errors
-    st.session_state.step = "download"
-    st.rerun()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = {pool.submit(_job, p): p[0] for p in payloads}
+            for i, fut in enumerate(as_completed(futures), 1):
+                name = futures[fut]
+                detail.write(f"Processing **{name}**…")
+                try:
+                    _, payload = fut.result()
+                    results[name] = payload
+                except ConversionError as e:
+                    errors[name] = str(e)
+                except Exception as e:
+                    errors[name] = (
+                        f"{type(e).__name__}: {e}\n\n"
+                        f"{traceback.format_exc()}"
+                    )
+                progress.progress(i / total, text=f"Converted {i}/{total}")
+
+        st.session_state.results = results
+        st.session_state.errors = errors
+        st.session_state.step = "download"
+        st.rerun()
+
+    except Exception:
+        st.error("🚨 Top-level crash during conversion:")
+        st.code(traceback.format_exc())
+        st.stop()
 
 # ================================================================== #
 # STEP 3: DOWNLOAD
@@ -140,17 +185,18 @@ elif st.session_state.step == "download":
     if errors:
         with st.expander(f"⚠️ {len(errors)} failed", expanded=True):
             for name, err in errors.items():
-                st.error(f"**{name}** — {err}")
+                st.error(f"**{name}**")
+                st.code(err)
 
-    # ----- Per-file display + downloads ----- #
     for name, payload in results.items():
         stem = name.rsplit(".", 1)[0]
         pdf_bytes = payload["pdf"]
         jpgs = payload["jpgs"]
 
         with st.expander(
-            f"📄 **{stem}.pdf** — {len(jpgs)} page(s) · {len(pdf_bytes)/1024:.0f} KB",
-            expanded=False,
+            f"📄 **{stem}.pdf** — {len(jpgs)} page(s) · "
+            f"{len(pdf_bytes)/1024:.0f} KB",
+            expanded=True,
         ):
             st.caption("Page previews")
             cols = st.columns(min(len(jpgs), 4))
@@ -187,7 +233,6 @@ elif st.session_state.step == "download":
                     use_container_width=True,
                 )
 
-    # ----- Bulk ZIP ----- #
     if len(results) > 1:
         st.divider()
         st.markdown("### 📦 Download everything")
@@ -223,7 +268,6 @@ elif st.session_state.step == "download":
                 use_container_width=True,
             )
 
-    # ----- Reset ----- #
     if st.button("🔄 Convert more files"):
         st.session_state.step = "upload"
         st.session_state.results = {}
