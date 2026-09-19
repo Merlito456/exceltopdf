@@ -4,13 +4,11 @@ XLSX → JPG pages → PDF pipeline.
 Stage 1: XLSX → PDF      (LibreOffice headless)
 Stage 2: PDF  → JPG/page (pdftoppm)
 Stage 3: JPGs → PDF      (Pillow)
-
-Rasterizing at stage 2 freezes the visual output — no formula
-recalculation, no font substitutions, no layout surprises.
 """
 from __future__ import annotations
 
 import io
+import os
 import shutil
 import subprocess
 import tempfile
@@ -55,11 +53,20 @@ SOFFICE = _find_soffice()
 PDFTOPPM = _find_pdftoppm()
 
 
+def _subprocess_env(workdir: Path) -> dict:
+    """Environment for subprocesses — force HOME into the temp dir."""
+    env = dict(os.environ)
+    env["HOME"] = str(workdir)
+    env.setdefault("LANG", "C.UTF-8")
+    env.setdefault("LC_ALL", "C.UTF-8")
+    return env
+
+
 # ------------------------------------------------------------------ #
 # Step 1: XLSX → intermediate PDF
 # ------------------------------------------------------------------ #
 def _disable_recalculation(profile_dir: Path) -> None:
-    """Tell LibreOffice to trust the cached formula values in the file."""
+    """Tell LibreOffice to trust cached formula values in the file."""
     user_dir = profile_dir / "user"
     user_dir.mkdir(parents=True, exist_ok=True)
     (user_dir / "registrymodifications.xcu").write_text(
@@ -109,7 +116,12 @@ def _xlsx_to_pdf_bytes(xlsx_bytes, filename, workdir, timeout=120):
 
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, check=False
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env=_subprocess_env(workdir),
         )
     except subprocess.TimeoutExpired as e:
         raise ConversionError(f"LibreOffice timed out after {timeout}s.") from e
@@ -117,7 +129,9 @@ def _xlsx_to_pdf_bytes(xlsx_bytes, filename, workdir, timeout=120):
     produced = out_dir / f"{stem}.pdf"
     if result.returncode != 0 or not produced.exists():
         err = (result.stderr or result.stdout or "").strip()
-        raise ConversionError(f"LibreOffice failed: {err[:400]}")
+        raise ConversionError(
+            f"LibreOffice failed (exit {result.returncode}): {err[:400]}"
+        )
 
     return produced.read_bytes()
 
@@ -138,13 +152,21 @@ def _pdf_to_jpgs(pdf_bytes, workdir, dpi=150, jpeg_quality=90):
 
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120, check=False
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+            env=_subprocess_env(workdir),
         )
     except subprocess.TimeoutExpired as e:
         raise ConversionError("pdftoppm timed out.") from e
 
     if result.returncode != 0:
-        raise ConversionError(f"pdftoppm failed: {result.stderr[:400]}")
+        raise ConversionError(
+            f"pdftoppm failed (exit {result.returncode}): "
+            f"{(result.stderr or result.stdout or '').strip()[:400]}"
+        )
 
     pages = sorted(workdir.glob("page-*.jpg"))
     if not pages:
@@ -174,9 +196,12 @@ def _jpgs_to_pdf(jpg_bytes_list, dpi=150):
 
         out = io.BytesIO()
         images[0].save(
-            out, format="PDF", save_all=True,
+            out,
+            format="PDF",
+            save_all=True,
             append_images=images[1:],
-            resolution=dpi, quality=90,
+            resolution=dpi,
+            quality=90,
         )
         return out.getvalue()
     finally:
