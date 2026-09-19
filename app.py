@@ -32,7 +32,7 @@ if "errors" not in st.session_state:
     st.session_state.errors = {}
 
 # ------------------------------------------------------------------ #
-# Sidebar: output quality knobs
+# Sidebar
 # ------------------------------------------------------------------ #
 with st.sidebar:
     st.header("🖼️ Image settings")
@@ -152,7 +152,6 @@ elif st.session_state.step == "download":
             f"📄 **{stem}.pdf** — {len(jpgs)} page(s) · {len(pdf_bytes)/1024:.0f} KB",
             expanded=False,
         ):
-            # Preview thumbnails
             st.caption("Page previews")
             cols = st.columns(min(len(jpgs), 4))
             for idx, jpg_bytes in enumerate(jpgs):
@@ -163,7 +162,6 @@ elif st.session_state.step == "download":
                         use_container_width=True,
                     )
 
-            # Download buttons
             c1, c2 = st.columns(2)
             with c1:
                 st.download_button(
@@ -176,7 +174,6 @@ elif st.session_state.step == "download":
                     type="primary",
                 )
             with c2:
-                # Bundle that file's JPGs into a zip
                 zbuf = io.BytesIO()
                 with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
                     for i, jpg_bytes in enumerate(jpgs, 1):
@@ -197,7 +194,6 @@ elif st.session_state.step == "download":
 
         c1, c2 = st.columns(2)
 
-        # All PDFs
         pdf_zip = io.BytesIO()
         with zipfile.ZipFile(pdf_zip, "w", zipfile.ZIP_DEFLATED) as zf:
             for name, payload in results.items():
@@ -212,7 +208,6 @@ elif st.session_state.step == "download":
                 type="primary",
             )
 
-        # All JPGs
         jpg_zip = io.BytesIO()
         with zipfile.ZipFile(jpg_zip, "w", zipfile.ZIP_DEFLATED) as zf:
             for name, payload in results.items():
