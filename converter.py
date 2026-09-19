@@ -1,5 +1,12 @@
 """
 XLSX → JPG pages → PDF pipeline.
+
+Stage 1: XLSX → PDF      (LibreOffice headless)
+Stage 2: PDF  → JPG/page (pdftoppm)
+Stage 3: JPGs → PDF      (Pillow)
+
+Rasterizing at stage 2 freezes the visual output — no formula
+recalculation, no font substitutions, no layout surprises.
 """
 from __future__ import annotations
 
@@ -16,6 +23,9 @@ class ConversionError(RuntimeError):
     pass
 
 
+# ------------------------------------------------------------------ #
+# Binary discovery
+# ------------------------------------------------------------------ #
 def _find_soffice() -> str:
     candidates = [
         shutil.which("soffice"),
@@ -45,16 +55,22 @@ SOFFICE = _find_soffice()
 PDFTOPPM = _find_pdftoppm()
 
 
+# ------------------------------------------------------------------ #
+# Step 1: XLSX → intermediate PDF
+# ------------------------------------------------------------------ #
 def _disable_recalculation(profile_dir: Path) -> None:
+    """Tell LibreOffice to trust the cached formula values in the file."""
     user_dir = profile_dir / "user"
     user_dir.mkdir(parents=True, exist_ok=True)
     (user_dir / "registrymodifications.xcu").write_text(
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<oor:items xmlns:oor="http://openoffice.org/2001/registry">\n'
         '  <item oor:path="/org.openoffice.Office.Calc/Formula/Load">'
-        '<prop oor:name="OOXMLRecalcMode" oor:op="fuse"><value>2</value></prop></item>\n'
+        '<prop oor:name="OOXMLRecalcMode" oor:op="fuse">'
+        '<value>2</value></prop></item>\n'
         '  <item oor:path="/org.openoffice.Office.Calc/Formula/Load">'
-        '<prop oor:name="ODFRecalcMode" oor:op="fuse"><value>2</value></prop></item>\n'
+        '<prop oor:name="ODFRecalcMode" oor:op="fuse">'
+        '<value>2</value></prop></item>\n'
         '</oor:items>\n',
         encoding="utf-8",
     )
@@ -106,6 +122,9 @@ def _xlsx_to_pdf_bytes(xlsx_bytes, filename, workdir, timeout=120):
     return produced.read_bytes()
 
 
+# ------------------------------------------------------------------ #
+# Step 2: PDF → one JPG per page
+# ------------------------------------------------------------------ #
 def _pdf_to_jpgs(pdf_bytes, workdir, dpi=150, jpeg_quality=90):
     src = workdir / "intermediate.pdf"
     src.write_bytes(pdf_bytes)
@@ -138,6 +157,9 @@ def _pdf_to_jpgs(pdf_bytes, workdir, dpi=150, jpeg_quality=90):
     return [p.read_bytes() for p in pages]
 
 
+# ------------------------------------------------------------------ #
+# Step 3: JPGs → final PDF
+# ------------------------------------------------------------------ #
 def _jpgs_to_pdf(jpg_bytes_list, dpi=150):
     images = []
     try:
@@ -162,6 +184,9 @@ def _jpgs_to_pdf(jpg_bytes_list, dpi=150):
             img.close()
 
 
+# ------------------------------------------------------------------ #
+# Public API
+# ------------------------------------------------------------------ #
 def convert_xlsx_to_pdf_via_jpg(
     xlsx_bytes: bytes,
     filename: str,
@@ -169,6 +194,12 @@ def convert_xlsx_to_pdf_via_jpg(
     jpeg_quality: int = 90,
     timeout: int = 120,
 ) -> tuple[bytes, list[bytes]]:
+    """
+    Full pipeline: XLSX → PDF → JPG per page → PDF.
+
+    Returns:
+        (final_pdf_bytes, list_of_jpg_page_bytes)
+    """
     with tempfile.TemporaryDirectory(prefix="xlsx2jpg2pdf_") as tmp:
         workdir = Path(tmp)
         intermediate_pdf = _xlsx_to_pdf_bytes(xlsx_bytes, filename, workdir, timeout)
